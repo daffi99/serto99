@@ -57,6 +57,7 @@ import {
   Activity,
   CloudUpload,
   Headphones,
+  Pencil,
 } from "lucide-react"
 
 interface SrtBlock {
@@ -147,6 +148,13 @@ export default function HomePage() {
   const [previewModalOpen, setPreviewModalOpen] = useState<boolean>(false)
   const [selectedHistoryItem, setSelectedHistoryItem] = useState<any>(null)
   const [loadingDetail, setLoadingDetail] = useState<boolean>(false)
+
+  // Rename History Item State
+  const [editingHistoryId, setEditingHistoryId] = useState<number | null>(null)
+  const [editingHistoryTitle, setEditingHistoryTitle] = useState<string>("")
+  const [savingRename, setSavingRename] = useState<boolean>(false)
+  const [isEditingModalTitle, setIsEditingModalTitle] = useState<boolean>(false)
+  const [modalTitleInput, setModalTitleInput] = useState<string>("")
 
   const languageMap: { [key: string]: string } = {
     auto: "Auto Detect",
@@ -704,6 +712,44 @@ export default function HomePage() {
     }
   }
 
+  // Rename Item in History & DB
+  const handleRenameItem = async (id: number, newTitle: string) => {
+    const cleanTitle = newTitle.trim().replace(/\.srt$/i, "")
+    if (!cleanTitle) {
+      alert("Nama proyek tidak boleh kosong.")
+      return
+    }
+
+    setSavingRename(true)
+    try {
+      const res = await fetch(`/api/subtitles/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: cleanTitle }),
+      })
+
+      const data = await res.json()
+      if (res.ok && data.success) {
+        const updatedTitle = data.item.title
+        setHistoryItems((prev) =>
+          prev.map((item) => (item.id === id ? { ...item, title: updatedTitle } : item)),
+        )
+        if (selectedHistoryItem?.id === id) {
+          setSelectedHistoryItem((prev: any) => ({ ...prev, title: updatedTitle }))
+        }
+        setEditingHistoryId(null)
+        setIsEditingModalTitle(false)
+      } else {
+        alert(data.error || "Gagal mengubah nama di database.")
+      }
+    } catch (err: any) {
+      console.error("Rename error:", err)
+      alert(`Gagal menyimpan nama baru: ${err.message}`)
+    } finally {
+      setSavingRename(false)
+    }
+  }
+
   const filteredHistory = historyItems.filter(
     (item) =>
       item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -925,13 +971,73 @@ export default function HomePage() {
                       >
                         <div className="space-y-1.5 flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-bold text-slate-900 text-sm sm:text-base truncate">
-                              {item.title}
-                            </span>
-                            <Badge variant="outline" className="text-[10px] bg-blue-50 text-blue-700 border-blue-200 font-semibold">
-                              {item.source_language} ➔ {item.target_language}
-                            </Badge>
-                            <span className="text-[11px] text-slate-400">#{item.id}</span>
+                            {editingHistoryId === item.id ? (
+                              <div
+                                className="flex items-center gap-2 py-0.5"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <Input
+                                  type="text"
+                                  value={editingHistoryTitle}
+                                  onChange={(e) => setEditingHistoryTitle(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") handleRenameItem(item.id, editingHistoryTitle)
+                                    if (e.key === "Escape") setEditingHistoryId(null)
+                                  }}
+                                  disabled={savingRename}
+                                  className="h-8 text-xs sm:text-sm font-semibold rounded-xl w-52 sm:w-80 bg-white border-blue-400 focus-visible:ring-1"
+                                  placeholder="Nama proyek baru..."
+                                  autoFocus
+                                />
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleRenameItem(item.id, editingHistoryTitle)}
+                                  disabled={savingRename || !editingHistoryTitle.trim()}
+                                  className="h-8 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs gap-1 font-bold shadow-xs"
+                                >
+                                  {savingRename ? (
+                                    <RefreshCw className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <Check className="w-3.5 h-3.5" />
+                                  )}
+                                  Simpan
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => setEditingHistoryId(null)}
+                                  disabled={savingRename}
+                                  className="h-8 px-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-xl text-xs"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </Button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 group/title">
+                                <span className="font-bold text-slate-900 text-sm sm:text-base truncate">
+                                  {item.title}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setEditingHistoryId(item.id)
+                                    setEditingHistoryTitle(item.title)
+                                  }}
+                                  className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors opacity-70 group-hover/title:opacity-100"
+                                  title="Ubah nama proyek (Rename)"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] bg-blue-50 text-blue-700 border-blue-200 font-semibold"
+                                >
+                                  {item.source_language} ➔ {item.target_language}
+                                </Badge>
+                                <span className="text-[11px] text-slate-400">#{item.id}</span>
+                              </div>
+                            )}
                           </div>
 
                           <div className="flex items-center gap-4 text-xs text-slate-500 flex-wrap">
@@ -953,6 +1059,18 @@ export default function HomePage() {
                         </div>
 
                         <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                          <Button
+                            onClick={() => {
+                              setEditingHistoryId(item.id)
+                              setEditingHistoryTitle(item.title)
+                            }}
+                            variant="outline"
+                            size="sm"
+                            className="rounded-xl text-xs gap-1.5 font-semibold text-slate-700 hover:text-blue-600 hover:border-blue-300"
+                          >
+                            <Pencil className="w-3.5 h-3.5 text-slate-500" />
+                            Rename
+                          </Button>
                           <Button
                             onClick={() => openHistoryDetail(item.id)}
                             variant="outline"
@@ -1701,9 +1819,65 @@ export default function HomePage() {
       <Dialog open={previewModalOpen} onOpenChange={setPreviewModalOpen}>
         <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto rounded-3xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 font-bold">
-              <Database className="w-5 h-5 text-indigo-600" />
-              Detail Proyek: {selectedHistoryItem?.title}
+            <DialogTitle className="flex items-center gap-2 font-bold flex-wrap">
+              <Database className="w-5 h-5 text-indigo-600 shrink-0" />
+              {isEditingModalTitle ? (
+                <div className="flex items-center gap-2 my-1">
+                  <Input
+                    value={modalTitleInput}
+                    onChange={(e) => setModalTitleInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && selectedHistoryItem) {
+                        handleRenameItem(selectedHistoryItem.id, modalTitleInput)
+                      }
+                      if (e.key === "Escape") setIsEditingModalTitle(false)
+                    }}
+                    disabled={savingRename}
+                    className="h-8 font-semibold text-sm rounded-xl border-blue-400 bg-white w-60 sm:w-80"
+                    placeholder="Nama proyek baru..."
+                    autoFocus
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      selectedHistoryItem && handleRenameItem(selectedHistoryItem.id, modalTitleInput)
+                    }
+                    disabled={savingRename || !modalTitleInput.trim()}
+                    className="h-8 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs gap-1 font-bold shadow-xs"
+                  >
+                    {savingRename ? (
+                      <RefreshCw className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Check className="w-3.5 h-3.5" />
+                    )}
+                    Simpan
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setIsEditingModalTitle(false)}
+                    disabled={savingRename}
+                    className="h-8 px-2 text-slate-500 rounded-xl"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 group/modalTitle">
+                  <span>Detail Proyek: {selectedHistoryItem?.title}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditingModalTitle(true)
+                      setModalTitleInput(selectedHistoryItem?.title || "")
+                    }}
+                    className="p-1 rounded-md text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                    title="Ubah nama proyek (Rename)"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </DialogTitle>
             <DialogDescription>
               Disimpan pada{" "}

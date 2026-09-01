@@ -79,3 +79,59 @@ export async function DELETE(
     )
   }
 }
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: { id: string } },
+) {
+  try {
+    if (!isDbConfigured()) {
+      return Response.json(
+        { error: "DATABASE_URL is not configured" },
+        { status: 500 },
+      )
+    }
+
+    await ensureTableExists()
+    const sql = getDb()
+    const id = Number.parseInt(params.id, 10)
+
+    if (isNaN(id)) {
+      return Response.json({ error: "Invalid ID" }, { status: 400 })
+    }
+
+    const body = await request.json()
+    const { title } = body
+
+    if (!title || typeof title !== "string" || !title.trim()) {
+      return Response.json({ error: "Nama proyek (title) tidak boleh kosong" }, { status: 400 })
+    }
+
+    const cleanTitle = title.trim().replace(/\.srt$/i, "")
+
+    const updated = await sql`
+      UPDATE subtitles_history
+      SET title = ${cleanTitle}
+      WHERE id = ${id}
+      RETURNING *
+    `
+
+    if (updated.length === 0) {
+      return Response.json({ error: "Record tidak ditemukan" }, { status: 404 })
+    }
+
+    return Response.json({
+      success: true,
+      item: updated[0],
+      message: "Nama proyek berhasil diubah di database.",
+    })
+  } catch (error: any) {
+    console.error("[API /api/subtitles/[id] PATCH error]:", error)
+    return Response.json(
+      {
+        error: `Gagal memperbarui nama di database: ${error instanceof Error ? error.message : String(error)}`,
+      },
+      { status: 500 },
+    )
+  }
+}
