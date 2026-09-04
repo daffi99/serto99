@@ -156,6 +156,17 @@ export default function HomePage() {
   const [isEditingModalTitle, setIsEditingModalTitle] = useState<boolean>(false)
   const [modalTitleInput, setModalTitleInput] = useState<string>("")
 
+  // Partial Save & Resume State
+  const [failedBatchIndex, setFailedBatchIndex] = useState<number | null>(null)
+  const [partialSavedId, setPartialSavedId] = useState<number | null>(null)
+  const [partialCount, setPartialCount] = useState<number>(0)
+  const [partialTranslatedSrt, setPartialTranslatedSrt] = useState<string>("")
+  const translatedBlocksMapRef = useRef<Map<number, string>>(new Map())
+  const joinedOriginalBlocksRef = useRef<SrtBlock[]>([])
+  const formattedOriginalSrtRef = useRef<string>("")
+  const cleanTitleRef = useRef<string>("")
+  const totalCharsRef = useRef<number>(0)
+
   const languageMap: { [key: string]: string } = {
     auto: "Auto Detect",
     german: "German",
@@ -307,6 +318,15 @@ export default function HomePage() {
     setTranslatedIndoSrt("")
     setPreviewBlocks([])
     setSavedDbId(null)
+    setFailedBatchIndex(null)
+    setPartialSavedId(null)
+    setPartialCount(0)
+    setPartialTranslatedSrt("")
+    translatedBlocksMapRef.current = new Map()
+    joinedOriginalBlocksRef.current = []
+    formattedOriginalSrtRef.current = ""
+    cleanTitleRef.current = ""
+    totalCharsRef.current = 0
     setLoading(false)
     setError(null)
     setSuccessMessage(null)
@@ -321,12 +341,12 @@ export default function HomePage() {
     if (wavInputRef.current) wavInputRef.current.value = ""
   }
 
-  // API Call Batch Translate with retry
+  // API Call Batch Translate with retry & auto-switching
   const translateBatchWithRetry = async (
     items: TranslateItem[],
     batchNum: number,
     totalNum: number,
-    maxRetries = 3,
+    maxRetries = 4,
   ): Promise<{ translatedItems: TranslateItem[]; model?: string }> => {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -347,13 +367,22 @@ export default function HomePage() {
 
         const data = await response.json()
 
-        if (response.status === 429) {
-          const waitTime = attempt * 3000
+        const isOverloadOrLimit =
+          response.status === 429 ||
+          response.status === 503 ||
+          data.error?.includes("503") ||
+          data.error?.includes("high demand") ||
+          data.error?.includes("429") ||
+          data.error?.includes("RESOURCE_EXHAUSTED") ||
+          data.error?.includes("UNAVAILABLE")
+
+        if (isOverloadOrLimit) {
+          const waitTime = attempt * 3500
           addLog(
-            `[Batch ${batchNum}] Rate limit (429) terdeteksi. Menunggu ${waitTime / 1000}s sebelum retry (Percobaan ${attempt}/${maxRetries})...`,
+            `[Batch ${batchNum}] Server Gemini sedang padat/rate limit. Menunggu jeda ${waitTime / 1000}s sebelum mencoba lagi (Percobaan ${attempt}/${maxRetries})...`,
             "warning",
           )
-          setBatchSubStep(`[Batch ${batchNum}] Kena rate limit. Menunggu ${waitTime / 1000}s (Retry ${attempt})...`)
+          setBatchSubStep(`[Batch ${batchNum}] Server Gemini sedang sibuk. Menunggu ${waitTime / 1000}s (Percobaan ${attempt})...`)
           await new Promise((resolve) => setTimeout(resolve, waitTime))
           continue
         }
@@ -375,9 +404,9 @@ export default function HomePage() {
         if (attempt === maxRetries) {
           throw err
         }
-        const waitTime = attempt * 2500
+        const waitTime = attempt * 3000
         addLog(
-          `[Batch ${batchNum}] Terjadi kendala: ${err.message}. Mencoba lagi dalam ${waitTime / 1000}s...`,
+          `[Batch ${batchNum}] Terjadi kendala: ${err.message}. Mencoba lagi dalam ${waitTime / 1000}s (Percobaan ${attempt + 1}/${maxRetries})...`,
           "warning",
         )
         await new Promise((resolve) => setTimeout(resolve, waitTime))
@@ -430,8 +459,8 @@ export default function HomePage() {
     }
   }
 
-  // Main Unified Workflow Handler
-  const handleExecuteWorkflow = async () => {
+  // Main Unified Workflow Handler (with partial resume capability)
+  const handleExecuteWorkflow = async (resumeFromBatchIndex: number = 0) => {
     if (!projectTitle.trim()) {
       setError("Silakan masukkan Judul / Nama File Proyek terlebih dahulu.")
       return
@@ -446,70 +475,110 @@ export default function HomePage() {
     setWorkflowStep("running")
     setError(null)
     setSuccessMessage(null)
-    setOriginalJoinedSrt("")
-    setTranslatedIndoSrt("")
-    setPreviewBlocks([])
-    setSavedDbId(null)
-    setCharactersUsed(0)
-    setRequestsMade(0)
-    setOverallProgress(5)
-    setLogs([])
+
+    const isResuming = resumeFromBatchIndex > 0
+
+    if (!isResuming) {
+      setOriginalJoinedSrt("")
+      setTranslatedIndoSrt("")
+      setPreviewBlocks([])
+      setSavedDbId(null)
+      setFailedBatchIndex(null)
+      setPartialSavedId(null)
+      setPartialCount(0)
+      setPartialTranslatedSrt("")
+      setCharactersUsed(0)
+      setRequestsMade(0)
+      setOverallProgress(5)
+      setLogs([])
+      translatedBlocksMapRef.current = new Map()
+    }
 
     const cleanTitle = projectTitle.trim().replace(/\.srt$/i, "")
-    addLog(`=== MEMULAI AI SUBTITLE WORKFLOW: "${cleanTitle}" ===`, "info")
+    cleanTitleRef.current = cleanTitle
+
+    if (isResuming) {
+      addLog(`=== MELANJUTKAN WORKFLOW DARI BATCH ${resumeFromBatchIndex + 1}: "${cleanTitle}" ===`, "info")
+    } else {
+      addLog(`=== MEMULAI AI SUBTITLE WORKFLOW: "${cleanTitle}" ===`, "info")
+    }
 
     try {
-      // ----------------------------------------------------
-      // STAGE 1: SRT JOINER + WAV OFFSET
-      // ----------------------------------------------------
-      setCurrentStage("joining")
-      setBatchSubStep("Menggabungkan file SRT dan menghitung offset durasi WAV...")
-      addLog(`[STAGE 1] Membaca ${srtFiles.length} file SRT dan ${wavFiles.length} file WAV...`, "step")
+      let joinedOriginalBlocks: SrtBlock[] = []
+      let formattedOriginalSrt = ""
 
-      let cumulativeWavOffsetMs = 0
-      const joinedOriginalBlocks: SrtBlock[] = []
-      let currentSrtIndex = 1
+      if (isResuming && joinedOriginalBlocksRef.current.length > 0) {
+        joinedOriginalBlocks = joinedOriginalBlocksRef.current
+        formattedOriginalSrt = formattedOriginalSrtRef.current
+        addLog(`Memuat ${joinedOriginalBlocks.length} baris subtitle gabungan dari cache.`, "info")
+      } else {
+        // ----------------------------------------------------
+        // STAGE 1: SRT JOINER + WAV OFFSET
+        // ----------------------------------------------------
+        setCurrentStage("joining")
+        const isSingleSrtWithoutWav = srtFiles.length === 1 && wavFiles.length === 0
+        setBatchSubStep(
+          isSingleSrtWithoutWav
+            ? "Membaca dan memvalidasi file subtitle..."
+            : "Menggabungkan file SRT dan menghitung offset durasi WAV..."
+        )
+        addLog(
+          isSingleSrtWithoutWav
+            ? `[STAGE 1] Membaca file subtitle ${srtFiles[0].name}...`
+            : `[STAGE 1] Membaca ${srtFiles.length} file SRT dan ${wavFiles.length} file WAV...`,
+          "step"
+        )
 
-      for (let i = 0; i < srtFiles.length; i++) {
-        const file = srtFiles[i]
-        const content = await file.text()
-        const blocks = parseSrt(content)
+        let cumulativeWavOffsetMs = 0
+        let currentSrtIndex = 1
 
-        if (blocks.length === 0) {
-          addLog(`Peringatan: File ${file.name} tidak memiliki subtitle valid, dilewati.`, "warning")
-          continue
-        }
+        for (let i = 0; i < srtFiles.length; i++) {
+          const file = srtFiles[i]
+          const content = await file.text()
+          const blocks = parseSrt(content)
 
-        const offsetForCurrentSrt = cumulativeWavOffsetMs
-        const adjustedBlocks = adjustSrtTimestamps(blocks, offsetForCurrentSrt)
+          if (blocks.length === 0) {
+            addLog(`Peringatan: File ${file.name} tidak memiliki subtitle valid, dilewati.`, "warning")
+            continue
+          }
 
-        adjustedBlocks.forEach((block) => {
-          joinedOriginalBlocks.push({ ...block, index: currentSrtIndex++ })
-        })
+          const offsetForCurrentSrt = cumulativeWavOffsetMs
+          const adjustedBlocks = adjustSrtTimestamps(blocks, offsetForCurrentSrt)
 
-        addLog(`File [${i + 1}/${srtFiles.length}] ${file.name}: ${blocks.length} baris digabungkan (Offset: +${(offsetForCurrentSrt / 1000).toFixed(2)}s).`, "info")
+          adjustedBlocks.forEach((block) => {
+            joinedOriginalBlocks.push({ ...block, index: currentSrtIndex++ })
+          })
 
-        if (wavFiles[i]) {
-          try {
-            const wavDuration = await getWavDuration(wavFiles[i])
-            cumulativeWavOffsetMs += wavDuration
-            addLog(`Audio WAV ${wavFiles[i].name} durasi: ${(wavDuration / 1000).toFixed(2)} detik (Offset kumulatif bertambah).`, "info")
-          } catch (wavErr) {
-            addLog(`Gagal membaca durasi WAV ${wavFiles[i].name}, lanjut tanpa offset audio ini.`, "warning")
+          addLog(
+            `File [${i + 1}/${srtFiles.length}] ${file.name}: ${blocks.length} baris diproses${offsetForCurrentSrt > 0 ? ` (Offset: +${(offsetForCurrentSrt / 1000).toFixed(2)}s)` : ""}.`,
+            "info"
+          )
+
+          if (wavFiles[i]) {
+            try {
+              const wavDuration = await getWavDuration(wavFiles[i])
+              cumulativeWavOffsetMs += wavDuration
+              addLog(`Audio WAV ${wavFiles[i].name} durasi: ${(wavDuration / 1000).toFixed(2)} detik (Offset kumulatif bertambah).`, "info")
+            } catch (wavErr) {
+              addLog(`Gagal membaca durasi WAV ${wavFiles[i].name}, lanjut tanpa offset audio ini.`, "warning")
+            }
           }
         }
+
+        if (joinedOriginalBlocks.length === 0) {
+          throw new Error("Tidak ada blok subtitle valid yang berhasil digabungkan dari file yang diunggah.")
+        }
+
+        formattedOriginalSrt = formatSrt(joinedOriginalBlocks)
+        setOriginalJoinedSrt(formattedOriginalSrt)
+        setTotalSubtitlesCount(joinedOriginalBlocks.length)
+
+        joinedOriginalBlocksRef.current = joinedOriginalBlocks
+        formattedOriginalSrtRef.current = formattedOriginalSrt
+
+        addLog(`✔️ [STAGE 1 SELESAI] Berhasil memproses ${joinedOriginalBlocks.length} total baris subtitle.`, "success")
+        setOverallProgress(20)
       }
-
-      if (joinedOriginalBlocks.length === 0) {
-        throw new Error("Tidak ada blok subtitle valid yang berhasil digabungkan dari file yang diunggah.")
-      }
-
-      const formattedOriginalSrt = formatSrt(joinedOriginalBlocks)
-      setOriginalJoinedSrt(formattedOriginalSrt)
-      setTotalSubtitlesCount(joinedOriginalBlocks.length)
-
-      addLog(`✔️ [STAGE 1 SELESAI] Berhasil menggabungkan ${joinedOriginalBlocks.length} total blok subtitle.`, "success")
-      setOverallProgress(20)
 
       // ----------------------------------------------------
       // STAGE 2: BATCH TRANSLATION TO INDONESIAN
@@ -526,11 +595,10 @@ export default function HomePage() {
       setTotalBatches(totalChunksCount)
       addLog(`Membagi ${joinedOriginalBlocks.length} baris menjadi ${totalChunksCount} batch (~${batchSize} baris/request).`, "info")
 
-      const translatedBlocksMap = new Map<number, string>()
-      let totalChars = 0
-      let reqCount = 0
+      let totalChars = totalCharsRef.current
+      let reqCount = requestsMade
 
-      for (let bIndex = 0; bIndex < chunks.length; bIndex++) {
+      for (let bIndex = resumeFromBatchIndex; bIndex < chunks.length; bIndex++) {
         const batchNumber = bIndex + 1
         const currentChunk = chunks[bIndex]
         setCurrentBatchIndex(batchNumber)
@@ -546,6 +614,7 @@ export default function HomePage() {
 
         const batchChars = currentChunk.reduce((acc, b) => acc + b.text.length, 0)
         totalChars += batchChars
+        totalCharsRef.current = totalChars
         setCharactersUsed(totalChars)
 
         const result = await translateBatchWithRetry(itemsToTranslate, batchNumber, totalChunksCount)
@@ -555,11 +624,13 @@ export default function HomePage() {
         result.translatedItems.forEach((item, itemIdx) => {
           const idNum = Number(item.id) || (currentChunk[itemIdx] ? currentChunk[itemIdx].index : null)
           if (idNum !== null) {
-            translatedBlocksMap.set(idNum, item.text)
+            translatedBlocksMapRef.current.set(idNum, item.text)
           }
         })
 
-        addLog(`[Batch ${batchNumber}/${totalChunksCount}] Selesai diterima (${result.translatedItems.length} item).`, "success")
+        setPartialCount(translatedBlocksMapRef.current.size)
+
+        addLog(`[Batch ${batchNumber}/${totalChunksCount}] Selesai diterima (${result.translatedItems.length} item). Total ${translatedBlocksMapRef.current.size}/${joinedOriginalBlocks.length} baris selesai.`, "success")
 
         const batchProgress = Math.round(20 + ((bIndex + 1) / totalChunksCount) * 60)
         setOverallProgress(batchProgress)
@@ -583,7 +654,7 @@ export default function HomePage() {
       const previews: { original: SrtBlock; translated: SrtBlock }[] = []
 
       for (const orig of joinedOriginalBlocks) {
-        const translatedText = translatedBlocksMap.get(Number(orig.index)) || orig.text
+        const translatedText = translatedBlocksMapRef.current.get(Number(orig.index)) || orig.text
         const translatedBlock: SrtBlock = {
           index: orig.index,
           startTime: orig.startTime,
@@ -606,7 +677,7 @@ export default function HomePage() {
       // STAGE 4: SAVING TO NEON DATABASE
       // ----------------------------------------------------
       setCurrentStage("saving")
-      setBatchSubStep("Menyimpan kedua file (Original Joined & Translated) ke database Neon...")
+      setBatchSubStep("Menyimpan kedua file ke database Neon...")
       addLog("[STAGE 4] Menyimpan rekaman proyek ke Neon PostgreSQL Database...", "step")
 
       const dbId = await saveToNeonDb(
@@ -624,16 +695,63 @@ export default function HomePage() {
       setCurrentStage("done")
       setWorkflowStep("completed")
       setOverallProgress(100)
+      setFailedBatchIndex(null)
       setBatchSubStep("Workflow Selesai! Kedua file siap diunduh.")
 
-      const successMsg = `Workflow berhasil diselesaikan! 2 file (${cleanTitle}_original_joined.srt & ${cleanTitle}_translated_indonesian.srt) siap diunduh.`
+      const isSingle = srtFiles.length === 1 && wavFiles.length === 0
+      const origName = isSingle ? `${cleanTitle}_original.srt` : `${cleanTitle}_original_joined.srt`
+      const successMsg = `Workflow berhasil diselesaikan! 2 file (${origName} & ${cleanTitle}_translated_indonesian.srt) siap diunduh.`
       setSuccessMessage(successMsg)
       addLog(`✨ WORKFLOW SELESAI 100%! ${joinedOriginalBlocks.length} baris subtitle berhasil diproses.`, "success")
     } catch (err: any) {
       console.error("Workflow error:", err)
       const msg = err instanceof Error ? err.message : String(err)
-      setError(`Workflow gagal: ${msg}`)
+      setError(`Workflow terhenti: ${msg}`)
       addLog(`❌ ERROR: ${msg}`, "error")
+
+      // ====================================================
+      // AUTO-SAVE PARTIAL PROGRESS TO NEON DATABASE
+      // ====================================================
+      const completedCount = translatedBlocksMapRef.current.size
+      const totalBlocks = joinedOriginalBlocksRef.current.length
+      if (completedCount > 0 && totalBlocks > 0) {
+        const failedBatch = currentBatchIndex || 1
+        setFailedBatchIndex(failedBatch)
+
+        addLog(`💾 Menyelamatkan ${completedCount} baris yang berhasil ke Database Neon...`, "step")
+
+        const partialBlocks: SrtBlock[] = joinedOriginalBlocksRef.current.map((orig) => ({
+          ...orig,
+          text: translatedBlocksMapRef.current.get(Number(orig.index)) || orig.text,
+        }))
+        const partialSrt = formatSrt(partialBlocks)
+        setPartialTranslatedSrt(partialSrt)
+        setPartialCount(completedCount)
+
+        const percent = Math.round((completedCount / totalBlocks) * 100)
+        const partialTitle = `[Partial ${percent}%] ${cleanTitleRef.current}`
+
+        try {
+          const dbId = await saveToNeonDb(
+            partialTitle,
+            formattedOriginalSrtRef.current,
+            partialSrt,
+            totalBlocks,
+            totalCharsRef.current,
+            srtFiles.length,
+          )
+          if (dbId) {
+            setPartialSavedId(dbId)
+            addLog(
+              `🛡️ HASIL SEMENTARA TERSIMPAN! ${completedCount} baris (${percent}%) sukses tersimpan di Neon DB (#${dbId}). Anda bisa melanjutkannya kapan saja.`,
+              "success"
+            )
+          }
+        } catch (dbErr) {
+          console.warn("Partial save failed:", dbErr)
+        }
+      }
+
       setCurrentStage("idle")
     } finally {
       setLoading(false)
@@ -1520,7 +1638,7 @@ export default function HomePage() {
                       >
                         <div className="flex items-center gap-1.5 mb-1">
                           <Layers className="w-3.5 h-3.5 text-blue-600" />
-                          <span>1. Join & Offset</span>
+                          <span>{srtFiles.length === 1 && wavFiles.length === 0 ? "1. Parse Subtitle" : "1. Join & Offset"}</span>
                         </div>
                         <span className="text-[10px] font-normal block">
                           {overallProgress >= 20 ? "Selesai" : "Menunggu..."}
@@ -1616,6 +1734,74 @@ export default function HomePage() {
                       </div>
                     </div>
 
+                    {/* Partial Save Recovery Banner when Failed */}
+                    {error && failedBatchIndex !== null && partialCount > 0 && (
+                      <div className="p-5 rounded-3xl bg-amber-50 border border-amber-200 text-slate-900 space-y-3.5 shadow-sm">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2 font-bold text-amber-950 text-sm">
+                            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                            <span>Progres {partialCount} Baris Berhasil Diamankan ke Database!</span>
+                          </div>
+                          {partialSavedId && (
+                            <span className="text-xs font-bold text-emerald-800 bg-emerald-100 px-3 py-1 rounded-full border border-emerald-200">
+                              Tersimpan di Neon DB: #{partialSavedId}
+                            </span>
+                          )}
+                        </div>
+
+                        <p className="text-xs text-slate-700 leading-relaxed font-medium">
+                          Workflow terhenti sementara di <strong>Batch {failedBatchIndex}</strong> karena beban server Gemini AI.
+                          Jangan khawatir, <strong>{partialCount} dari {totalSubtitlesCount} baris</strong> yang sudah selesai diterjemahkan telah otomatis diamankan ke database Neon. Anda dapat mengunduh hasil sementara sekarang atau melanjutkan sisa batch tanpa mengulang dari awal!
+                        </p>
+
+                        <div className="flex items-center gap-3 flex-wrap pt-1">
+                          <Button
+                            onClick={() => handleExecuteWorkflow(failedBatchIndex - 1)}
+                            disabled={loading}
+                            className="h-11 px-6 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold gap-2 shadow-md shadow-blue-500/25"
+                          >
+                            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                            ▶️ Lanjutkan dari Batch {failedBatchIndex}
+                          </Button>
+
+                          {partialTranslatedSrt && (
+                            <Button
+                              onClick={() =>
+                                downloadSingleFile(
+                                  partialTranslatedSrt,
+                                  `${cleanProjectTitle}_partial_${partialCount}subs.srt`,
+                                )
+                              }
+                              variant="outline"
+                              className="h-11 px-5 rounded-2xl bg-white border-amber-300 text-amber-900 hover:bg-amber-100/50 text-xs font-bold gap-2"
+                            >
+                              <Download className="w-4 h-4 text-amber-700" />
+                              Download Hasil Sementara ({partialCount} baris .srt)
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Standard Error Alert if no partial progress yet */}
+                    {error && partialCount === 0 && (
+                      <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs sm:text-sm flex items-start gap-3">
+                        <AlertCircle className="w-5 h-5 shrink-0 text-rose-600 mt-0.5" />
+                        <div className="space-y-1.5 flex-1">
+                          <p className="font-bold">Workflow Terhenti</p>
+                          <p>{error}</p>
+                          <Button
+                            onClick={() => handleExecuteWorkflow(0)}
+                            size="sm"
+                            disabled={loading}
+                            className="mt-1 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold"
+                          >
+                            Coba Ulang
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Success Download Banner */}
                     {workflowStep === "completed" && originalJoinedSrt && translatedIndoSrt && (
                       <div className="p-5 bg-emerald-50/80 border border-emerald-200 rounded-3xl space-y-3">
@@ -1634,13 +1820,20 @@ export default function HomePage() {
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                           <Button
                             onClick={() =>
-                              downloadSingleFile(originalJoinedSrt, `${cleanProjectTitle}_original_joined.srt`)
+                              downloadSingleFile(
+                                originalJoinedSrt,
+                                srtFiles.length === 1 && wavFiles.length === 0
+                                  ? `${cleanProjectTitle}_original.srt`
+                                  : `${cleanProjectTitle}_original_joined.srt`,
+                              )
                             }
                             variant="outline"
                             className="bg-white border-slate-300 text-slate-800 text-xs font-bold py-5 rounded-2xl hover:bg-slate-50"
                           >
                             <Download className="w-4 h-4 mr-1.5 text-blue-600" />
-                            1. Original Joined (.srt)
+                            {srtFiles.length === 1 && wavFiles.length === 0
+                              ? "1. Original Subtitle (.srt)"
+                              : "1. Original Joined (.srt)"}
                           </Button>
 
                           <Button
