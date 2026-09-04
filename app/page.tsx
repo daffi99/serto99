@@ -460,7 +460,12 @@ export default function HomePage() {
   }
 
   // Main Unified Workflow Handler (with partial resume capability)
-  const handleExecuteWorkflow = async (resumeFromBatchIndex: number = 0) => {
+  const handleExecuteWorkflow = async (resumeFromBatchIndex?: number | any) => {
+    const safeResumeIndex =
+      typeof resumeFromBatchIndex === "number" && !isNaN(resumeFromBatchIndex) && resumeFromBatchIndex > 0
+        ? resumeFromBatchIndex
+        : 0
+
     if (!projectTitle.trim()) {
       setError("Silakan masukkan Judul / Nama File Proyek terlebih dahulu.")
       return
@@ -476,7 +481,7 @@ export default function HomePage() {
     setError(null)
     setSuccessMessage(null)
 
-    const isResuming = resumeFromBatchIndex > 0
+    const isResuming = safeResumeIndex > 0
 
     if (!isResuming) {
       setOriginalJoinedSrt("")
@@ -498,7 +503,7 @@ export default function HomePage() {
     cleanTitleRef.current = cleanTitle
 
     if (isResuming) {
-      addLog(`=== MELANJUTKAN WORKFLOW DARI BATCH ${resumeFromBatchIndex + 1}: "${cleanTitle}" ===`, "info")
+      addLog(`=== MELANJUTKAN WORKFLOW DARI BATCH ${safeResumeIndex + 1}: "${cleanTitle}" ===`, "info")
     } else {
       addLog(`=== MEMULAI AI SUBTITLE WORKFLOW: "${cleanTitle}" ===`, "info")
     }
@@ -598,7 +603,7 @@ export default function HomePage() {
       let totalChars = totalCharsRef.current
       let reqCount = requestsMade
 
-      for (let bIndex = resumeFromBatchIndex; bIndex < chunks.length; bIndex++) {
+      for (let bIndex = safeResumeIndex; bIndex < chunks.length; bIndex++) {
         const batchNumber = bIndex + 1
         const currentChunk = chunks[bIndex]
         setCurrentBatchIndex(batchNumber)
@@ -1546,7 +1551,7 @@ export default function HomePage() {
                     </Button>
 
                     <Button
-                      onClick={handleExecuteWorkflow}
+                      onClick={() => handleExecuteWorkflow(0)}
                       className="h-12 px-7 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs sm:text-sm gap-2 shadow-lg shadow-blue-500/25"
                       disabled={loading || !projectTitle.trim() || srtFiles.length === 0}
                     >
