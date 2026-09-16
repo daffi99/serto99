@@ -19,12 +19,19 @@ import {
   BookOpen,
   Split,
   FileCode,
+  Clock,
 } from "lucide-react"
 
 export default function Navbar() {
   const pathname = usePathname()
 
   const otherPages = [
+    {
+      href: "/duration",
+      label: "Duration Extractor",
+      desc: "Hitung durasi WAV & MP4 secara batch",
+      icon: Clock,
+    },
     {
       href: "/srt-translate",
       label: "SRT Translate (AI)",
@@ -59,7 +66,7 @@ export default function Navbar() {
 
   const isOtherActive = otherPages.some((p) => pathname === p.href)
 
-  if (pathname === "/" || pathname === "/workflow") {
+  if (pathname === "/" || pathname === "/workflow" || pathname === "/duration") {
     return null
   }
 

@@ -216,6 +216,13 @@ export default function HomePage() {
 
   useEffect(() => {
     fetchHistory()
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search)
+      const view = params.get("view")
+      if (view === "history" || view === "others" || view === "workflow") {
+        setCurrentView(view)
+      }
+    }
   }, [])
 
   // Process selected SRT files
@@ -920,6 +927,14 @@ export default function HomePage() {
               <span>New workflow</span>
             </button>
 
+            <Link
+              href="/duration"
+              className="w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-medium transition-all text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+            >
+              <Clock className="w-4 h-4 text-slate-400" />
+              <span>Duration Extractor</span>
+            </Link>
+
             <button
               onClick={() => setCurrentView("others")}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-sm font-medium transition-all ${
@@ -1230,6 +1245,14 @@ export default function HomePage() {
               <p className="text-xs text-slate-500">Akses modul subtitle individual secara mandiri.</p>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <Link href="/duration" className="p-4 rounded-2xl border border-slate-100 hover:border-blue-200 hover:bg-blue-50/40 transition-all flex items-start gap-3">
+                <div className="p-2.5 rounded-xl bg-blue-100 text-blue-600"><Clock className="w-5 h-5" /></div>
+                <div>
+                  <h4 className="font-bold text-sm text-slate-800">Duration Extractor</h4>
+                  <p className="text-xs text-slate-500">Hitung & ekstrak durasi file WAV, MP4, MP3 secara batch.</p>
+                </div>
+              </Link>
+
               <Link href="/srt-translate" className="p-4 rounded-2xl border border-slate-100 hover:border-blue-200 hover:bg-blue-50/40 transition-all flex items-start gap-3">
                 <div className="p-2.5 rounded-xl bg-blue-100 text-blue-600"><Languages className="w-5 h-5" /></div>
                 <div>
